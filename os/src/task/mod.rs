@@ -14,7 +14,9 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +135,44 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Increase syscall statistics for current running task.
+    pub fn increase_current_task_syscall_times(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_times[syscall_id] += 1;
+    }
+
+    /// Get syscall statistics for current running task.
+    pub fn get_current_task_syscall_times(&self, syscall_id: usize) -> isize {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return 0;
+        }
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_times[syscall_id] as isize
+    }
+
+    /// Map user pages into current running task address space.
+    pub fn current_task_mmap(&self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur]
+            .memory_set
+            .map_anonymous(start.into(), (start + len).into(), permission)
+    }
+
+    /// Unmap user pages from current running task address space.
+    pub fn current_task_munmap(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur]
+            .memory_set
+            .unmap_anonymous(VirtAddr::from(start), VirtAddr::from(start + len))
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +241,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increase syscall statistics for current running task.
+pub fn increase_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.increase_current_task_syscall_times(syscall_id)
+}
+
+/// Get syscall statistics for current running task.
+pub fn current_syscall_times(syscall_id: usize) -> isize {
+    TASK_MANAGER.get_current_task_syscall_times(syscall_id)
+}
+
+/// Map user pages into current running task address space.
+pub fn current_task_mmap(start: usize, len: usize, permission: MapPermission) -> bool {
+    TASK_MANAGER.current_task_mmap(start, len, permission)
+}
+
+/// Unmap user pages from current running task address space.
+pub fn current_task_munmap(start: usize, len: usize) -> bool {
+    TASK_MANAGER.current_task_munmap(start, len)
 }
