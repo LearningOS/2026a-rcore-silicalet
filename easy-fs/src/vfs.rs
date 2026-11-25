@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
+    inode_id: u32,
     block_id: usize,
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
@@ -17,12 +18,14 @@ pub struct Inode {
 impl Inode {
     /// Create a vfs inode
     pub fn new(
+        inode_id: u32,
         block_id: u32,
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
+            inode_id,
             block_id: block_id as usize,
             block_offset,
             fs,
@@ -52,7 +55,7 @@ impl Inode {
                 disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
                 DIRENT_SZ,
             );
-            if dirent.name() == name {
+            if dirent.inode_id() != 0 && dirent.name() == name {
                 return Some(dirent.inode_id() as u32);
             }
         }
@@ -65,6 +68,7 @@ impl Inode {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
                 Arc::new(Self::new(
+                    inode_id,
                     block_id,
                     block_offset,
                     self.fs.clone(),
@@ -113,15 +117,25 @@ impl Inode {
                 new_inode.initialize(DiskInodeType::File);
             });
         self.modify_disk_inode(|root_inode| {
-            // append file in the dirent
-            let file_count = (root_inode.size as usize) / DIRENT_SZ;
-            let new_size = (file_count + 1) * DIRENT_SZ;
-            // increase size
-            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let mut entry = DirEntry::empty();
+            let end = root_inode.size as usize;
+            let offset = (0..end)
+                .step_by(DIRENT_SZ)
+                .find(|&offset| {
+                    assert_eq!(
+                        root_inode.read_at(offset, entry.as_bytes_mut(), &self.block_device),
+                        DIRENT_SZ,
+                    );
+                    entry.inode_id() == 0
+                })
+                .unwrap_or(end);
+            if offset == end {
+                self.increase_size((end + DIRENT_SZ) as u32, root_inode, &mut fs);
+            }
             // write dirent
             let dirent = DirEntry::new(name, new_inode_id);
             root_inode.write_at(
-                file_count * DIRENT_SZ,
+                offset,
                 dirent.as_bytes(),
                 &self.block_device,
             );
@@ -131,6 +145,7 @@ impl Inode {
         block_cache_sync_all();
         // return inode
         Some(Arc::new(Self::new(
+            new_inode_id,
             block_id,
             block_offset,
             self.fs.clone(),
@@ -150,7 +165,9 @@ impl Inode {
                     disk_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device,),
                     DIRENT_SZ,
                 );
-                v.push(String::from(dirent.name()));
+                if dirent.inode_id() != 0 {
+                    v.push(String::from(dirent.name()));
+                }
             }
             v
         })
@@ -160,15 +177,26 @@ impl Inode {
         let _fs = self.fs.lock();
         self.read_disk_inode(|disk_inode| disk_inode.read_at(offset, buf, &self.block_device))
     }
-    /// Write data to current inode
+    /// Write data and sync the filesystem cache before returning.
     pub fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let size = self.write_at_cached(offset, buf);
+        self.sync();
+        size
+    }
+
+    /// Write data through the block cache without forcing immediate disk I/O.
+    pub fn write_at_cached(&self, offset: usize, buf: &[u8]) -> usize {
         let mut fs = self.fs.lock();
-        let size = self.modify_disk_inode(|disk_inode| {
+        self.modify_disk_inode(|disk_inode| {
             self.increase_size((offset + buf.len()) as u32, disk_inode, &mut fs);
             disk_inode.write_at(offset, buf, &self.block_device)
-        });
+        })
+    }
+
+    /// Flush the filesystem's dirty cached blocks to the device.
+    pub fn sync(&self) {
+        let _fs = self.fs.lock();
         block_cache_sync_all();
-        size
     }
     /// Clear the data in current inode
     pub fn clear(&self) {
@@ -182,5 +210,17 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    /// Reclaim an inode after the last link and open file are gone.
+    pub fn reclaim(&self) {
+        self.clear();
+        self.fs.lock().dealloc_inode(self.inode_id);
+        block_cache_sync_all();
+    }
+
+    /// Return inode id.
+    pub fn inode_id(&self) -> u32 {
+        self.inode_id
     }
 }
