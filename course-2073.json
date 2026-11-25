@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "courseId": 2073,
+  "repository": "LearningOS/2026a-rcore-silicalet",
+  "user": "silicalet",
+  "totalScore": 500,
+  "chapters": {
+    "ch4": {
+      "points": "16/16",
+      "score": 100,
+      "commit": "decfa38331c24be47809ee4ad7ed4c96854c79e0"
+    }
+  },
+  "score": 100,
+  "upload": {
+    "status": "pending",
+    "runId": "45666465093",
+    "runAttempt": "1"
+  }
+}
