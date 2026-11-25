@@ -49,6 +49,14 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    pub deadlock_detect_enabled: bool,
+    pub mutex_owner: Vec<Option<usize>>,
+    pub mutex_wait_queue: Vec<Vec<usize>>,
+    pub mutex_wait_for: Vec<Option<usize>>,
+    pub semaphore_count: Vec<isize>,
+    pub semaphore_alloc: Vec<Vec<usize>>,
+    pub semaphore_wait_queue: Vec<Vec<usize>>,
+    pub semaphore_wait_for: Vec<Option<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +89,117 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    pub fn ensure_deadlock_tid(&mut self, tid: usize) {
+        if self.mutex_wait_for.len() <= tid {
+            self.mutex_wait_for.resize(tid + 1, None);
+        }
+        if self.semaphore_wait_for.len() <= tid {
+            self.semaphore_wait_for.resize(tid + 1, None);
+        }
+        for alloc in self.semaphore_alloc.iter_mut() {
+            if alloc.len() <= tid {
+                alloc.resize(tid + 1, 0);
+            }
+        }
+    }
+    pub fn check_mutex_deadlock(&self, tid: usize, mutex_id: usize) -> bool {
+        let owner = self
+            .mutex_owner
+            .get(mutex_id)
+            .and_then(|owner| *owner);
+        if owner.is_none() {
+            return false;
+        }
+        let mut cur = owner;
+        let mut vis = alloc::collections::BTreeSet::new();
+        while let Some(thread) = cur {
+            if thread == tid {
+                return true;
+            }
+            if !vis.insert(thread) {
+                return false;
+            }
+            cur = self
+                .mutex_wait_for
+                .get(thread)
+                .and_then(|waiting| *waiting)
+                .and_then(|waiting_mutex_id| {
+                    self.mutex_owner
+                        .get(waiting_mutex_id)
+                        .and_then(|next_owner| *next_owner)
+                });
+        }
+        false
+    }
+    pub fn check_semaphore_deadlock(&self, tid: usize, sem_id: usize) -> bool {
+        let m = self.semaphore_count.len();
+        if sem_id >= m {
+            return false;
+        }
+        let mut n = tid + 1;
+        if self.semaphore_wait_for.len() > n {
+            n = self.semaphore_wait_for.len();
+        }
+        for alloc in self.semaphore_alloc.iter() {
+            if alloc.len() > n {
+                n = alloc.len();
+            }
+        }
+        if n == 0 {
+            return false;
+        }
+        let mut work = alloc::vec::Vec::with_capacity(m);
+        for count in self.semaphore_count.iter() {
+            work.push((*count).max(0) as usize);
+        }
+        let mut finish = alloc::vec![false; n];
+        let mut need = alloc::vec![alloc::vec![0usize; m]; n];
+        let mut allocation = alloc::vec![alloc::vec![0usize; m]; n];
+        for thread in 0..n {
+            if let Some(Some(wait_sem_id)) = self.semaphore_wait_for.get(thread) {
+                if *wait_sem_id < m {
+                    need[thread][*wait_sem_id] = 1;
+                }
+            }
+            if thread == tid {
+                need[thread][sem_id] = 1;
+            }
+            for resource in 0..m {
+                allocation[thread][resource] = self
+                    .semaphore_alloc
+                    .get(resource)
+                    .and_then(|res_alloc| res_alloc.get(thread))
+                    .copied()
+                    .unwrap_or(0);
+            }
+        }
+        loop {
+            let mut progress = false;
+            for thread in 0..n {
+                if finish[thread] {
+                    continue;
+                }
+                let mut ok = true;
+                for resource in 0..m {
+                    if need[thread][resource] > work[resource] {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    for resource in 0..m {
+                        work[resource] += allocation[thread][resource];
+                    }
+                    finish[thread] = true;
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        !finish.into_iter().all(|done| done)
     }
 }
 
@@ -119,6 +238,14 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_owner: Vec::new(),
+                    mutex_wait_queue: Vec::new(),
+                    mutex_wait_for: Vec::new(),
+                    semaphore_count: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_wait_queue: Vec::new(),
+                    semaphore_wait_for: Vec::new(),
                 })
             },
         });
@@ -245,6 +372,14 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_owner: Vec::new(),
+                    mutex_wait_queue: Vec::new(),
+                    mutex_wait_for: Vec::new(),
+                    semaphore_count: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_wait_queue: Vec::new(),
+                    semaphore_wait_for: Vec::new(),
                 })
             },
         });
